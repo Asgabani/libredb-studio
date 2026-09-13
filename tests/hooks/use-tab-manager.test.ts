@@ -4,7 +4,7 @@ import { describe, test, expect, mock, beforeEach } from "bun:test";
 import { renderHook, act, waitFor } from "@testing-library/react";
 
 // Shared mocks — process-wide singletons (no contamination)
-import "../helpers/mock-sonner";
+import { mockToastDefault } from "../helpers/mock-sonner";
 import "../helpers/mock-navigation";
 
 import { useTabManager } from "@/hooks/use-tab-manager";
@@ -73,9 +73,17 @@ const testSchema: DetailedObject[] = [
   },
 ];
 
+type ToastOptions = { action: { label: string; onClick: () => void } };
+
+function lastToastCall() {
+  const call = mockToastDefault.mock.calls.at(-1) as unknown as [string, ToastOptions];
+  return { message: call[0], options: call[1] };
+}
+
 describe("useTabManager", () => {
   beforeEach(() => {
     localStorage.clear();
+    mockToastDefault.mockClear();
   });
 
   test("starts with one default tab", () => {
@@ -205,6 +213,149 @@ describe("useTabManager", () => {
     // Still one tab, nothing changed
     expect(result.current.tabs).toHaveLength(1);
     expect(result.current.tabs[0].id).toBe("default");
+  });
+
+  test("closeTab does not toast when it can't close the only remaining tab", () => {
+    const { result } = renderHook(() =>
+      useTabManager({
+        activeConnection: null,
+        metadata: null,
+        schema: [],
+      }),
+    );
+
+    act(() => {
+      result.current.closeTab("default", { stopPropagation: () => {} } as React.MouseEvent);
+    });
+
+    expect(mockToastDefault).not.toHaveBeenCalled();
+  });
+
+  test("closeTab offers an Undo toast naming the closed tab", () => {
+    const { result } = renderHook(() =>
+      useTabManager({
+        activeConnection: null,
+        metadata: null,
+        schema: [],
+      }),
+    );
+
+    act(() => {
+      result.current.addTab();
+    });
+
+    act(() => {
+      result.current.closeTab("default", { stopPropagation: () => {} } as React.MouseEvent);
+    });
+
+    const { message, options } = lastToastCall();
+    expect(message).toContain("Query 1");
+    expect(options.action.label).toBe("Undo");
+  });
+
+  test("Undo restores the closed tab's query, name and original position", () => {
+    const { result } = renderHook(() =>
+      useTabManager({
+        activeConnection: null,
+        metadata: null,
+        schema: [],
+      }),
+    );
+
+    act(() => {
+      result.current.updateTabById("default", { query: "SELECT 1;" });
+      result.current.addTab();
+    });
+    const secondTabId = result.current.tabs[1].id;
+
+    act(() => {
+      result.current.closeTab("default", { stopPropagation: () => {} } as React.MouseEvent);
+    });
+    expect(result.current.tabs).toHaveLength(1);
+
+    act(() => {
+      lastToastCall().options.action.onClick();
+    });
+
+    expect(result.current.tabs).toHaveLength(2);
+    expect(result.current.tabs[0].id).toBe("default");
+    expect(result.current.tabs[0].query).toBe("SELECT 1;");
+    expect(result.current.tabs[1].id).toBe(secondTabId);
+    expect(result.current.activeTabId).toBe("default");
+  });
+
+  test("Undo re-activates the closed tab even if another tab is active by then", () => {
+    const { result } = renderHook(() =>
+      useTabManager({
+        activeConnection: null,
+        metadata: null,
+        schema: [],
+      }),
+    );
+
+    act(() => {
+      result.current.addTab();
+    });
+    const secondTabId = result.current.tabs[1].id;
+
+    act(() => {
+      result.current.closeTab(secondTabId, { stopPropagation: () => {} } as React.MouseEvent);
+    });
+    // closeTab fell back to the only remaining tab.
+    expect(result.current.activeTabId).toBe("default");
+
+    act(() => {
+      lastToastCall().options.action.onClick();
+    });
+
+    expect(result.current.activeTabId).toBe(secondTabId);
+  });
+
+  test("Undo is a no-op once a second tab has since been closed", () => {
+    const { result } = renderHook(() =>
+      useTabManager({
+        activeConnection: null,
+        metadata: null,
+        schema: [],
+      }),
+    );
+
+    act(() => {
+      result.current.addTab();
+      result.current.addTab();
+    });
+    expect(result.current.tabs).toHaveLength(3);
+
+    act(() => {
+      result.current.closeTab(result.current.tabs[0].id, { stopPropagation: () => {} } as React.MouseEvent);
+    });
+    act(() => {
+      result.current.closeTab(result.current.tabs[0].id, { stopPropagation: () => {} } as React.MouseEvent);
+    });
+    expect(result.current.tabs).toHaveLength(1);
+
+    act(() => {
+      result.current.reopenLastClosedTab();
+    });
+
+    // Undo only ever restores the MOST recent close (#747) - the first is gone for good.
+    expect(result.current.tabs).toHaveLength(2);
+  });
+
+  test("reopenLastClosedTab is a no-op when nothing has been closed", () => {
+    const { result } = renderHook(() =>
+      useTabManager({
+        activeConnection: null,
+        metadata: null,
+        schema: [],
+      }),
+    );
+
+    act(() => {
+      result.current.reopenLastClosedTab();
+    });
+
+    expect(result.current.tabs).toHaveLength(1);
   });
 
   test("updateCurrentTab updates the active tab properties", () => {

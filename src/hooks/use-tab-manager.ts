@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useCallback, useEffect, useMemo } from "react";
+import { useState, useCallback, useEffect, useMemo, useRef } from "react";
+import { toast } from "sonner";
 import type { DatabaseConnection, QueryTab } from "@/lib/types";
 import type { DetailedObject } from "@/lib/db/detailed-object";
 import type { ProviderMetadata } from "@/hooks/use-provider-metadata";
@@ -9,6 +10,12 @@ import { pathKey } from "@/lib/db/object-path";
 import { resolveTabType } from "@/lib/editor/tab-language";
 import { logger } from "@/lib/logger";
 import { newLocalId } from "@/lib/ids";
+
+/** A tab `closeTab` removed, and where it sat, so `reopenLastClosedTab` can put it back (#747). */
+interface ClosedTab {
+  tab: QueryTab;
+  index: number;
+}
 
 const DEFAULT_TAB: QueryTab = {
   id: "default",
@@ -168,19 +175,47 @@ export function useTabManager({ activeConnection, metadata, schema, persistWorks
     setActiveTabId(newId);
   }, [metadata]);
 
+  /**
+   * Holds exactly the one tab `closeTab` most recently removed (#747). A ref, not state:
+   * nothing renders from it, only `reopenLastClosedTab` reads it, and closing a second tab
+   * before undoing the first deliberately drops the first — undo answers the immediate
+   * misclick the issue describes, not a multi-level history, so there is nothing here that
+   * needs to survive past the next close.
+   */
+  const lastClosedTabRef = useRef<ClosedTab | null>(null);
+
+  const reopenLastClosedTab = useCallback(() => {
+    const closed = lastClosedTabRef.current;
+    if (!closed) return;
+    lastClosedTabRef.current = null;
+    setTabs((prev) => {
+      const next = [...prev];
+      next.splice(Math.min(closed.index, next.length), 0, closed.tab);
+      return next;
+    });
+    setActiveTabId(closed.tab.id);
+  }, []);
+
   const closeTab = useCallback(
     (id: string, e: React.MouseEvent) => {
       e.stopPropagation();
-      setTabs((prev) => {
-        if (prev.length === 1) return prev;
-        const newTabs = prev.filter((t) => t.id !== id);
-        if (activeTabId === id && newTabs.length > 0) {
-          setActiveTabId(newTabs[newTabs.length - 1].id);
-        }
-        return newTabs;
+      if (tabs.length === 1) return;
+      const index = tabs.findIndex((t) => t.id === id);
+      if (index === -1) return;
+      const closedTab = tabs[index];
+
+      setTabs((prev) => prev.filter((t) => t.id !== id));
+      if (activeTabId === id) {
+        const remaining = tabs.filter((t) => t.id !== id);
+        if (remaining.length > 0) setActiveTabId(remaining[remaining.length - 1].id);
+      }
+
+      lastClosedTabRef.current = { tab: closedTab, index };
+      toast(`Closed "${closedTab.name}"`, {
+        action: { label: "Undo", onClick: () => reopenLastClosedTab() },
       });
     },
-    [activeTabId],
+    [tabs, activeTabId, reopenLastClosedTab],
   );
 
   /**
@@ -272,6 +307,7 @@ export function useTabManager({ activeConnection, metadata, schema, persistWorks
     setEditingTabName,
     addTab,
     closeTab,
+    reopenLastClosedTab,
     updateCurrentTab,
     updateTabById,
     handleTableClick,
