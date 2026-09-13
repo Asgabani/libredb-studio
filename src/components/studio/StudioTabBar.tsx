@@ -9,7 +9,8 @@ import { FileBraces, FileCode, Hash, Plus, X } from "lucide-react";
 // Cmd/Ctrl+Shift+X is unclaimed by Chrome, Firefox and Safari (checked against
 // their published shortcut lists) and stays reachable on every platform.
 const NEW_TAB_SHORTCUT_CODE = "KeyX";
-const NEW_TAB_SHORTCUT_LABEL = "Ctrl+Shift+X";
+/** Exported so the shortcuts registry (#746) shows the same label this file actually binds. */
+export const NEW_TAB_SHORTCUT_LABEL = "Ctrl+Shift+X";
 
 /**
  * Which icon a tab draws, in ONE place because the bar draws it in TWO (#789 Phase 2).

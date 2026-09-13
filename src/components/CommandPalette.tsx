@@ -23,6 +23,7 @@ import {
   Bot,
   TextAlignStart,
   Save,
+  Keyboard,
 } from "lucide-react";
 import { DatabaseConnection, SavedQuery, QueryHistoryItem } from "@/lib/types";
 import { relationObjects, type DetailedObject } from "@/lib/db/detailed-object";
@@ -63,6 +64,8 @@ interface CommandPaletteProps {
    * shell declines to offer elsewhere too (`MobileNav.onOpenAgent`).
    */
   onAskAgent?: () => void;
+  /** Opens the standalone shell's `ShortcutsDialog` instance (#746). */
+  onShowShortcuts: () => void;
   onLogout: () => void;
 }
 
@@ -83,6 +86,7 @@ export function CommandPalette({
   onFormatQuery,
   onSaveQuery,
   onAskAgent,
+  onShowShortcuts,
   onLogout,
 }: CommandPaletteProps) {
   const [open, setOpen] = useState(false);
@@ -140,6 +144,11 @@ export function CommandPalette({
           <CommandItem onSelect={() => runAction(onSaveQuery)}>
             <Save strokeWidth={1.5} className="w-3.5 h-3.5 text-fg-tertiary" />
             <span>Save Current Query</span>
+          </CommandItem>
+          <CommandItem onSelect={() => runAction(onShowShortcuts)}>
+            <Keyboard strokeWidth={1.5} className="w-3.5 h-3.5 text-fg-tertiary" />
+            <span>Keyboard Shortcuts</span>
+            <CommandShortcut>?</CommandShortcut>
           </CommandItem>
           {onAskAgent && (
             /*
