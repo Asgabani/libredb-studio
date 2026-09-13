@@ -50,6 +50,7 @@ import { useAgentArtifact } from "@/components/agent/use-agent-artifact";
 import { useAgentPrefill } from "@/components/agent/use-agent-prefill";
 import { useToast } from "@/hooks/use-toast";
 import { useProviderMetadata } from "@/hooks/use-provider-metadata";
+import { useConnectionOrder } from "@/hooks/use-connection-order";
 import { useAuth } from "@/hooks/use-auth";
 import { useConnectionManager } from "@/hooks/use-connection-manager";
 import { useTabManager } from "@/hooks/use-tab-manager";
@@ -108,6 +109,7 @@ export default function Studio() {
   // 2. Connection Manager + Provider Metadata
   const conn = useConnectionManager(storageReady);
   const { metadata, error: metadataError, retry: retryMetadata } = useProviderMetadata(conn.activeConnection);
+  const { order: connectionOrder, setOrder: setConnectionOrder } = useConnectionOrder(storageReady);
 
   // 3. Tab Manager
   const tabMgr = useTabManager({
@@ -584,6 +586,8 @@ export default function Studio() {
                   setIsConnectionModalOpen(true);
                 }}
                 onDuplicateConnection={handleDuplicateConnection}
+                connectionOrder={connectionOrder}
+                onReorderConnections={setConnectionOrder}
                 onAddConnection={() => setIsConnectionModalOpen(true)}
                 onObjectClick={onObjectClick}
                 objectActions={objectActions}
@@ -701,6 +705,8 @@ export default function Studio() {
                     }}
                     onDeleteConnection={requestDeleteConnection}
                     onDuplicateConnection={handleDuplicateConnection}
+                    connectionOrder={connectionOrder}
+                    onReorderConnections={setConnectionOrder}
                     onAddConnection={() => setIsConnectionModalOpen(true)}
                   />
                 </div>

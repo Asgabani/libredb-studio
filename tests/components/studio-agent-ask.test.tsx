@@ -200,6 +200,8 @@ mock.module("@/lib/storage", () => ({
     // Read by the REAL command palette when it opens.
     getSavedQueries: mock(() => [] as unknown[]),
     getHistory: mock(() => [] as unknown[]),
+    getConnectionOrder: mock(() => [] as string[]),
+    setConnectionOrder: mock(() => {}),
   },
 }));
 

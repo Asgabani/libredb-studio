@@ -19,6 +19,9 @@ interface SidebarProps {
   onDeleteConnection: (id: string) => void;
   onEditConnection?: (conn: DatabaseConnection) => void;
   onDuplicateConnection?: (conn: DatabaseConnection) => void;
+  /** The user's saved custom order (#748). Absent means reordering is not wired up. */
+  connectionOrder?: string[];
+  onReorderConnections?: (order: string[]) => void;
   onAddConnection: () => void;
   /** A row the reader activated, handed over whole: path, kind and the fields the tree loaded. */
   onObjectClick?: (object: DatabaseObject) => void;
@@ -75,6 +78,8 @@ export function Sidebar({
   onDeleteConnection,
   onEditConnection,
   onDuplicateConnection,
+  connectionOrder,
+  onReorderConnections,
   onAddConnection,
   onObjectClick,
   onShowDiagram,
@@ -134,6 +139,8 @@ export function Sidebar({
           onDeleteConnection={onDeleteConnection}
           onEditConnection={onEditConnection}
           onDuplicateConnection={onDuplicateConnection}
+          connectionOrder={connectionOrder}
+          onReorderConnections={onReorderConnections}
           onAddConnection={onAddConnection}
         />
       </ScrollArea>

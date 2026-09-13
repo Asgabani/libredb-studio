@@ -83,6 +83,16 @@ export const storage = {
     dispatchChange("connections", filtered);
   },
 
+  getConnectionOrder: (): string[] => {
+    return readJSON<string[]>("connection_order") ?? [];
+  },
+
+  /** Replaces the persisted order wholesale — callers hand over the full id list they want. */
+  setConnectionOrder: (order: string[]) => {
+    writeJSON("connection_order", order);
+    dispatchChange("connection_order", order);
+  },
+
   // ═══════════════════════════════════════════════════════════════════════════
   // History
   // ═══════════════════════════════════════════════════════════════════════════

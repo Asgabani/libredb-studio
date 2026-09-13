@@ -186,3 +186,41 @@ describe("storage facade: threshold config", () => {
     expect(result[0].metric).toBe("custom");
   });
 });
+
+// ── Connection order (#748) ──────────────────────────────────────────────────
+
+describe("storage facade: connection order", () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  test("getConnectionOrder returns an empty array when nothing stored", () => {
+    expect(storage.getConnectionOrder()).toEqual([]);
+  });
+
+  test("setConnectionOrder persists the full id list", () => {
+    storage.setConnectionOrder(["conn-2", "conn-1"]);
+    expect(storage.getConnectionOrder()).toEqual(["conn-2", "conn-1"]);
+  });
+
+  test("setConnectionOrder replaces any previously persisted order", () => {
+    storage.setConnectionOrder(["conn-1", "conn-2"]);
+    storage.setConnectionOrder(["conn-2", "conn-1"]);
+    expect(storage.getConnectionOrder()).toEqual(["conn-2", "conn-1"]);
+  });
+
+  test("setConnectionOrder dispatches libredb-storage-change with collection connection_order", () => {
+    let captured: CustomEvent | null = null;
+    const handler = (e: Event) => {
+      captured = e as CustomEvent;
+    };
+    window.addEventListener("libredb-storage-change", handler);
+
+    storage.setConnectionOrder(["conn-1"]);
+
+    window.removeEventListener("libredb-storage-change", handler);
+    expect(captured).not.toBeNull();
+    expect((captured as unknown as CustomEvent).detail.collection).toBe("connection_order");
+    expect((captured as unknown as CustomEvent).detail.data).toEqual(["conn-1"]);
+  });
+});

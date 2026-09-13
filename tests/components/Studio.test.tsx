@@ -76,6 +76,8 @@ const mockStorageSaveConnection = mock(() => {});
 const mockStorageGetConnections = mock(() => [] as unknown[]);
 const mockStorageDeleteConnection = mock(() => {});
 const mockStorageSaveQuery = mock(() => {});
+const mockStorageGetConnectionOrder = mock(() => [] as string[]);
+const mockStorageSetConnectionOrder = mock(() => {});
 // Data Masking
 const mockSaveMaskingConfig = mock(() => {});
 // URL (for export tests)
@@ -235,6 +237,8 @@ mock.module("@/lib/storage", () => ({
     deleteConnection: mockStorageDeleteConnection,
     saveQuery: mockStorageSaveQuery,
     getActiveConnectionId: mock(() => null),
+    getConnectionOrder: mockStorageGetConnectionOrder,
+    setConnectionOrder: mockStorageSetConnectionOrder,
   },
 }));
 
@@ -572,6 +576,9 @@ describe("Studio", () => {
     mockStorageGetConnections.mockReturnValue([]);
     mockStorageDeleteConnection.mockClear();
     mockStorageSaveQuery.mockClear();
+    mockStorageGetConnectionOrder.mockClear();
+    mockStorageGetConnectionOrder.mockReturnValue([]);
+    mockStorageSetConnectionOrder.mockClear();
     mockSaveMaskingConfig.mockClear();
     mockCreateObjectURL.mockClear();
     mockRevokeObjectURL.mockClear();
@@ -1102,6 +1109,30 @@ describe("Studio", () => {
     expect(mockStorageSaveConnection).toHaveBeenCalledWith(secondCopy);
     expect(source).toEqual(original);
   });
+
+  test("loads connectionOrder from storage and forwards it to Sidebar", () => {
+    mockStorageGetConnectionOrder.mockReturnValue(["conn-2", "conn-1"]);
+
+    render(<Studio />);
+
+    expect(mockStorageGetConnectionOrder).toHaveBeenCalled();
+    expect(capturedSidebarProps.connectionOrder).toEqual(["conn-2", "conn-1"]);
+  });
+
+  test.each(["desktop", "mobile"] as const)(
+    "onReorderConnections (%s) calls storage.setConnectionOrder with the new order",
+    (surface) => {
+      render(<Studio />);
+      if (surface === "mobile") {
+        act(() => (capturedMobileNavProps.onTabChange as (tab: string) => void)("database"));
+      }
+      const props = surface === "mobile" ? capturedConnectionsListProps : capturedSidebarProps;
+
+      act(() => (props.onReorderConnections as (order: string[]) => void)(["conn-2", "conn-1"]));
+
+      expect(mockStorageSetConnectionOrder).toHaveBeenCalledWith(["conn-2", "conn-1"]);
+    },
+  );
 
   test("onAddConnection opens connection modal", () => {
     render(<Studio />);

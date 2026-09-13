@@ -21,6 +21,7 @@ const mockStorage = {
   })),
   getThresholdConfig: mock(() => []),
   getDismissedSeeds: mock(() => ["seed-1"]),
+  getConnectionOrder: mock(() => ["c1"]),
 };
 
 const ALL_COLLECTIONS = [
@@ -34,6 +35,7 @@ const ALL_COLLECTIONS = [
   "masking_config",
   "threshold_config",
   "dismissed_seeds",
+  "connection_order",
 ];
 
 mock.module("@/lib/storage", () => ({
@@ -289,6 +291,7 @@ describe("useStorageSync", () => {
       expect(mockStorage.getMaskingConfig).toHaveBeenCalled();
       expect(mockStorage.getThresholdConfig).toHaveBeenCalled();
       expect(mockStorage.getDismissedSeeds).toHaveBeenCalled();
+      expect(mockStorage.getConnectionOrder).toHaveBeenCalled();
     });
   });
 
@@ -378,6 +381,23 @@ describe("useStorageSync", () => {
       });
 
       expect(localStorage.getItem("libredb_active_connection_id")).toBe("conn-1");
+    });
+
+    test("writes connection_order to localStorage on pull", async () => {
+      localStorage.setItem("libredb_server_migrated", "true");
+      setupServerMode({
+        "/api/storage": { ok: true, status: 200, json: { connection_order: ["c2", "c1"] } },
+      });
+
+      const { result } = renderHook(() => useStorageSync());
+
+      await waitFor(() => {
+        expect(result.current.lastSyncedAt).not.toBeNull();
+      });
+
+      const stored = localStorage.getItem("libredb_connection_order");
+      expect(stored).not.toBeNull();
+      expect(JSON.parse(stored!)).toEqual(["c2", "c1"]);
     });
 
     test("removes active_connection_id from localStorage when server returns null", async () => {
