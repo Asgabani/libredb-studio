@@ -2,14 +2,31 @@
 
 import React, { useEffect, type Dispatch, type SetStateAction } from "react";
 import type { QueryTab } from "@/lib/types";
+import { SHORTCUTS, matchesShortcut, shortcutLabel } from "@/lib/keyboard-shortcuts";
 import { cn } from "@/lib/utils";
-import { FileBraces, Hash, Plus, X } from "lucide-react";
+import { FileBraces, FileCode, Hash, Plus, X } from "lucide-react";
 
-// Cmd/Ctrl+T and Cmd/Ctrl+N belong to the browser, so no page can bind them;
-// Cmd/Ctrl+Shift+X is unclaimed by Chrome, Firefox and Safari (checked against
-// their published shortcut lists) and stays reachable on every platform.
-const NEW_TAB_SHORTCUT_CODE = "KeyX";
-const NEW_TAB_SHORTCUT_LABEL = "Ctrl+Shift+X";
+/**
+ * Which icon a tab draws, in ONE place because the bar draws it in TWO (#789 Phase 2).
+ *
+ * The rename input and the tab button each render the icon beside the name, and the ladder
+ * used to be written out at both sites. A third arm added to one of them and not the other is
+ * a drift nothing would report, so the ladder is a function and the two sites call it.
+ *
+ * The SOURCE arm is first and it wins over the dialect. A Source tab holds no query, so its
+ * `type` is the neutral `"sql"` on a SQL connection and whatever `resolveTabType` answered on
+ * a document connection; without this arm a Source tab on MongoDB or Redis would take the
+ * document icon and be indistinguishable from a query tab in the one place a reader picks a
+ * tab from. Nothing errors if the arm is missing, which is exactly why it is tested.
+ */
+function tabIcon(tab: QueryTab): React.JSX.Element {
+  // The ELEMENT rather than the component, so nothing here assigns a component to a local
+  // inside a render: `react(static-components)` is an error in this repository's oxlint
+  // configuration, and the three returns also keep the size and the stroke in one place.
+  if (tab.source !== undefined) return <FileCode strokeWidth={1.5} className="w-3 h-3" />;
+  if (tab.type === "sql") return <Hash strokeWidth={1.5} className="w-3 h-3" />;
+  return <FileBraces strokeWidth={1.5} className="w-3 h-3" />;
+}
 
 interface StudioTabBarProps {
   tabs: QueryTab[];
@@ -61,7 +78,7 @@ export function StudioTabBar({
   // tab rename input is excluded so the shortcut does not interrupt renaming.
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.code !== NEW_TAB_SHORTCUT_CODE || !(event.metaKey || event.ctrlKey) || !event.shiftKey) return;
+      if (!matchesShortcut(event, SHORTCUTS.newTab)) return;
       const target = event.target;
       if (target instanceof HTMLInputElement && target.getAttribute("aria-label")?.startsWith("Rename ")) return;
       event.preventDefault();
@@ -93,11 +110,7 @@ export function StudioTabBar({
         >
           {editingTabId === tab.id ? (
             <>
-              {tab.type === "sql" ? (
-                <Hash strokeWidth={1.5} className="w-3 h-3" />
-              ) : (
-                <FileBraces strokeWidth={1.5} className="w-3 h-3" />
-              )}
+              {tabIcon(tab)}
               <input
                 autoFocus
                 aria-label={`Rename ${tab.name}`}
@@ -141,11 +154,7 @@ export function StudioTabBar({
               }}
               className="flex items-center gap-2 flex-1 min-w-0 h-full text-left cursor-pointer"
             >
-              {tab.type === "sql" ? (
-                <Hash strokeWidth={1.5} className="w-3 h-3" />
-              ) : (
-                <FileBraces strokeWidth={1.5} className="w-3 h-3" />
-              )}
+              {tabIcon(tab)}
               <span className="text-xs truncate font-medium">{tab.name}</span>
             </button>
           )}
@@ -172,7 +181,7 @@ export function StudioTabBar({
       <button
         type="button"
         aria-label="New tab"
-        title={`New Query Tab (${NEW_TAB_SHORTCUT_LABEL})`}
+        title={`New Query Tab (${shortcutLabel(SHORTCUTS.newTab)})`}
         className="text-fg-muted cursor-pointer hover:text-fg-bright mx-2"
         onClick={onAddTab}
       >

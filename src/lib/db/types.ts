@@ -618,6 +618,18 @@ export interface QueryPrepareOptions {
 // Provider Interface (Strategy Pattern)
 // ============================================================================
 
+/**
+ * What `endOpenQueryTransaction()` found and did: `"none"` when the session carried no
+ * open transaction, `"rolled-back"` when it did and the transaction has been discarded.
+ *
+ * Discarded rather than committed, deliberately. A script that opened a transaction and
+ * never said COMMIT did not ask for its work to be kept, and committing on its behalf
+ * would write changes on an authority nobody gave. The caller is expected to tell the
+ * user which of the two happened; silence is what shipped, and silence is what let a
+ * script's unfinished transaction reach another user.
+ */
+export type OpenQueryTransactionOutcome = "none" | "rolled-back";
+
 export interface DatabaseProvider {
   /** Database type identifier */
   readonly type: DatabaseType;
@@ -657,6 +669,47 @@ export interface DatabaseProvider {
    * that lack it rather than falling back to `query()` (fail closed).
    */
   queryReadOnly?(sql: string, budget: ReadOnlyStatementBudget): Promise<QueryResult>;
+
+  /**
+   * End a transaction that a statement run through `query()` left open on the session
+   * `query()` runs on, and say whether there was one (D71).
+   *
+   * WHY IT EXISTS. `getOrCreateProvider` caches one provider per `connection.id` for the
+   * whole process, so a transaction that outlives the request belongs to whoever borrows
+   * that handle next. Measured 2026-09-13 through the product's own routes:
+   * `POST /api/db/multi-query` with `BEGIN; CREATE TABLE ...; SELECT * FROM <missing>`
+   * stops on the third statement and leaves the first one's transaction open. On
+   * PostgreSQL 17 the next request — a DIFFERENT user, on `POST /api/db/query` — answered
+   * HTTP 500 "current transaction is aborted, commands ignored until end of transaction
+   * block", and so did `POST /api/db/maintenance` minutes later; on SQLite and DuckDB the
+   * next user's INSERT answered 200 and read its own row back while an independent reader
+   * saw nothing, and a later ROLLBACK destroyed it with no error anywhere.
+   *
+   * WHY IT IS ONE CALL AND NOT AN ASK FOLLOWED BY A ROLLBACK. Two engines cannot separate
+   * them. On PostgreSQL the answer lives on ONE pooled client (`pg`'s ReadyForQuery status)
+   * and a rollback issued through a second pool checkout is not guaranteed to reach the
+   * same one, so the ask and the act have to name the same client. On DuckDB v1.5.5 there
+   * is no ask at all: `current_transaction_id()` answers in both states,
+   * `transaction_timestamp()` is an alias of `get_current_timestamp()`, and the client
+   * context carries only a connection id, so the engine's own refusal of a ROLLBACK is the
+   * only reading available. The RESULT still answers the question, which is what the
+   * caller needs in order to tell the user what became of the transaction they opened.
+   *
+   * `"none"` is an ANSWER, never a failure: an unconditional ROLLBACK is not an option
+   * because a rollback with nothing to roll back raises — measured on bun:sqlite 1.4.2 and
+   * DuckDB v1.5.5, both "cannot rollback - no transaction is active".
+   *
+   * OPTIONAL, for the reason `queryReadOnly` is: only a provider that can name the session
+   * its own `query()` ran on can answer truthfully, and a provider that cannot must say
+   * nothing rather than guess. `postgres`, `sqlite` and `duckdb` implement it, which are
+   * the three engines D71 was measured on. A caller shape-checks for it; there is no
+   * default, because a default that answered `"none"` would certify an absence nobody read.
+   *
+   * It does NOT touch the interactive transaction session `POST /api/db/transaction`
+   * drives (`beginTransaction()` and friends). That session holds a connection of its own
+   * that `query()` never runs on, so it is never the session this method names.
+   */
+  endOpenQueryTransaction?(): Promise<OpenQueryTransactionOutcome>;
 
   /**
    * Containers at `parent`, or the top level when `parent` is absent (#789).
@@ -725,6 +778,31 @@ export interface DatabaseProvider {
    * `describeObject` answers three empty arrays for one of them.
    */
   describeObjects(container: readonly string[], kind: string, limit?: number): Promise<ObjectDetailBatch>;
+
+  /**
+   * The definition text of ONE object, as a document of named parts (#789 Phase 2).
+   *
+   * OPTIONAL, unlike the five object methods above, and the asymmetry is argued rather than
+   * inherited. Those five are required because a provider that does not implement them
+   * answers nothing at all about what a database holds. A provider that does not implement
+   * this one answers everything about what the database holds and simply declares no
+   * source-bearing kind, which is the TRUE and measured state of `druid` and `libredb`:
+   * neither has a kind with a definition text anywhere, so a required method would put an
+   * unreachable throw in each, which is precisely the shape that got the 501 deleted.
+   *
+   * `kind` is required for the reason `describeObject`'s is: measured on MySQL, MariaDB and
+   * DuckDB, one name addresses more than one object of different kinds in one container, so a
+   * path alone reads the wrong object.
+   *
+   * `limit` bounds ONE PART's character count. Absent means unbounded. A provider may apply a
+   * bound of its own, and must then set `truncated` on the part it bounded and never on a part
+   * it read whole.
+   *
+   * The declaration and the method cannot disagree: `assertObjectSurface` asserts, in BOTH
+   * directions, that a provider declares a kind with `hasSource` exactly when it implements
+   * this method.
+   */
+  readObjectSource?(path: readonly string[], kind: string, limit?: number): Promise<ObjectSourceDocument>;
 
   /**
    * Get health and performance metrics
@@ -1328,4 +1406,95 @@ export interface ObjectDetailBatch {
   readonly details: readonly ObjectDetail[];
   /** Absent when every object of that kind in that container was described. */
   readonly truncated?: { readonly limit: number; readonly reason: string };
+}
+
+/**
+ * What this text IS, so a reader is never shown a fragment that looks like a statement (#789).
+ *
+ * CLOSED: two arms, both with producers in the shipped fleet. `complete` runs as given;
+ * `partial` is a body or a bare SELECT that does not. PostgreSQL's `pg_get_viewdef`, DuckDB's
+ * `macro_definition` and Couchbase's `definition.text` are the measured `partial` producers.
+ */
+export type ObjectSourceForm = "complete" | "partial";
+
+/**
+ * Where this text came from, so a reader is never shown a reconstruction as an original (#789).
+ *
+ * CLOSED: three arms, each with at least one producer. `stored` is the author's own bytes
+ * (SQL Server modules, SQLite's `sqlite_schema.sql`); `regenerated` is the engine rebuilding
+ * from its catalog, which PostgreSQL documents as "a decompiled reconstruction, not the
+ * original text of the command"; `rendered` is a structured definition this product prints as
+ * JSON (a MongoDB view, a search pipeline or template).
+ */
+export type ObjectSourceOrigin = "stored" | "regenerated" | "rendered";
+
+/**
+ * One text belonging to one object, or the engine's own reason there is none (#789).
+ *
+ * A UNION and not one shape with an optional `text`, for the reason `KindCount` is a union: a
+ * refusal and an empty answer are different facts, and a shape carrying `text?: string` makes
+ * them the same value at every call site. The refused arm declares NO `text`, so a value
+ * narrowed to it cannot reach an editor buffer. That composition is what DBeaver gets wrong:
+ * measured in its source, an unreadable definition reaches a WRITABLE editor holding one
+ * comment line.
+ *
+ * The union closes that path in ONE DIRECTION ONLY, and saying so here is what stops the next
+ * implementer from trusting it for the other. MEASURED against tsc 6.0.3 with no cast
+ * anywhere: a literal carrying `unavailable` BESIDE `text`, `language`, `form` and `origin`
+ * COMPILES as an `ObjectSourcePart`, because TypeScript's excess-property check on a union
+ * admits any property declared on ANY member of it. Such a part narrows to the refusal arm, so
+ * a provider composing one (spreading a catalog row, or spreading a conditional
+ * `{unavailable}` onto a bounded text) would put a refusal sentence over a definition the
+ * engine really returned. `assertObjectSurface` refuses that part by name for our own
+ * providers, and that is the ONLY refusal standing today. A HOST's answer is unguarded: the
+ * embedded seam's runtime shape check, the one `isRenderableShape` in
+ * `src/components/object-tree/use-tree-nodes.ts` is the precedent for, is later work in #789
+ * Phase 2 and does not exist in this tree.
+ *
+ * `id` is provider-local. Core reads it as an identity WITHIN ONE DOCUMENT and for nothing
+ * else: the part switcher's selection key, and the Source tab's remembered selection. Core
+ * never compares it against a literal, never branches on it, and never carries it between two
+ * documents.
+ *
+ * `text` is never empty and never whitespace only. TypeScript cannot express that, so it is a
+ * runtime invariant, asserted in `assertObjectSurface` for our own providers and, for a host's
+ * answer, by the same shape check that does not exist yet. Where an engine answers empty, the
+ * provider emits a REFUSAL carrying the engine's own fact instead.
+ */
+export type ObjectSourcePart =
+  | {
+      readonly id: string;
+      /** The engine's own word: "Package body", "Specification". Rendered as-is. */
+      readonly label: string;
+      readonly text: string;
+      /** A Monaco language id the installed bundle registers. `plsql`, `tsql` and `cql` are not. */
+      readonly language: string;
+      readonly form: ObjectSourceForm;
+      readonly origin: ObjectSourceOrigin;
+      readonly truncated?: { readonly limit: number; readonly reason: string };
+    }
+  | {
+      readonly id: string;
+      readonly label: string;
+      /** The engine's own sentence, unprefixed, never a rewrite of it. */
+      readonly unavailable: string;
+    };
+
+/**
+ * One object's definition, as its provider reads it (#789).
+ *
+ * `parts` is a NON-EMPTY tuple, which makes a zero-part document a compile error at every
+ * provider: there is no shape in which the renderer is handed a document and has nothing to
+ * draw. Two spellings satisfy it and no third is accepted: an array literal, and
+ * `const parts: [ObjectSourcePart, ...ObjectSourcePart[]] = [first]` plus a conditional push.
+ * `rows.map(...)` does not, and casting past it defeats the whole invariant.
+ *
+ * More than one part is not a special case for one engine: an Oracle package and a MariaDB
+ * package are each ONE node over two texts, and core branches on `parts.length` and on nothing
+ * else.
+ */
+export interface ObjectSourceDocument {
+  readonly path: readonly string[];
+  readonly kind: string;
+  readonly parts: readonly [ObjectSourcePart, ...ObjectSourcePart[]];
 }
