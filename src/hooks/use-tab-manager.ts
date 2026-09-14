@@ -12,10 +12,13 @@ import { resolveTabType } from "@/lib/editor/tab-language";
 import { logger } from "@/lib/logger";
 import { newLocalId } from "@/lib/ids";
 
-/** A tab `closeTab` removed, and where it sat, so `reopenLastClosedTab` can put it back (#747). */
+/** A tab `closeTab` removed, where it sat, and the workspace it sat in, so its Undo can put it back (#747). */
 interface ClosedTab {
   tab: QueryTab;
   index: number;
+  /** The tab to its right when it closed, or null when it was last: the anchor that survives other closes. */
+  nextTabId: string | null;
+  workspaceKey: string;
 }
 
 const DEFAULT_TAB: QueryTab = {
@@ -250,22 +253,35 @@ export function useTabManager({ activeConnection, metadata, schema, persistWorks
     setActiveTabId(newId);
   }, [metadata]);
 
-  /**
-   * Holds exactly the one tab `closeTab` most recently removed (#747). A ref, not state:
-   * nothing renders from it, only `reopenLastClosedTab` reads it, and closing a second tab
-   * before undoing the first deliberately drops the first — undo answers the immediate
-   * misclick the issue describes, not a multi-level history, so there is nothing here that
-   * needs to survive past the next close.
+  /*
+   * The Undo toasts still on screen, and the workspace the hook is showing (#747).
+   *
+   * Each toast closes over the tab it names rather than sharing one "last closed" slot: sonner
+   * keeps several toasts up at once, so a shared slot let the Undo under `Closed "Query 1"`
+   * restore Query 2. A closed tab belongs to the workspace it was closed in, so a connection
+   * switch dismisses the outstanding toasts, and a click that lands during the dismissal is
+   * checked against the workspace key: restoring it into another connection duplicated the
+   * `default` id there and the SAVE EFFECT persisted the duplicate.
    */
-  const lastClosedTabRef = useRef<ClosedTab | null>(null);
+  const undoToastIdsRef = useRef<Array<string | number>>([]);
+  const workspaceKeyRef = useRef(workspaceKey);
+  useEffect(() => {
+    workspaceKeyRef.current = workspaceKey;
+    for (const id of undoToastIdsRef.current) toast.dismiss(id);
+    undoToastIdsRef.current = [];
+  }, [workspaceKey]);
 
-  const reopenLastClosedTab = useCallback(() => {
-    const closed = lastClosedTabRef.current;
-    if (!closed) return;
-    lastClosedTabRef.current = null;
+  const reopenClosedTab = useCallback((closed: ClosedTab) => {
+    if (closed.workspaceKey !== workspaceKeyRef.current) return;
     setTabs((prev) => {
+      // A tab id is unique in a workspace. It is already present when this Undo was clicked
+      // before, or when a Source tab, whose id is derived from its address, was opened again.
+      if (prev.some((t) => t.id === closed.tab.id)) return prev;
+      // Back before its right-hand neighbour when that tab is still open. The index alone is
+      // stale as soon as another tab to its left closes too, which is the ordinary way to tidy up.
+      const anchor = closed.nextTabId === null ? -1 : prev.findIndex((t) => t.id === closed.nextTabId);
       const next = [...prev];
-      next.splice(Math.min(closed.index, next.length), 0, closed.tab);
+      next.splice(anchor === -1 ? Math.min(closed.index, next.length) : anchor, 0, closed.tab);
       return next;
     });
     setActiveTabId(closed.tab.id);
@@ -277,20 +293,22 @@ export function useTabManager({ activeConnection, metadata, schema, persistWorks
       if (tabs.length === 1) return;
       const index = tabs.findIndex((t) => t.id === id);
       if (index === -1) return;
-      const closedTab = tabs[index];
+      const closed: ClosedTab = { tab: tabs[index], index, nextTabId: tabs[index + 1]?.id ?? null, workspaceKey };
 
-      setTabs((prev) => prev.filter((t) => t.id !== id));
+      // The last-tab guard is evaluated again inside the updater, against the state actually
+      // being written: two closes batched into one commit both pass the check above.
+      setTabs((prev) => (prev.length === 1 ? prev : prev.filter((t) => t.id !== id)));
       if (activeTabId === id) {
         const remaining = tabs.filter((t) => t.id !== id);
-        if (remaining.length > 0) setActiveTabId(remaining[remaining.length - 1].id);
+        setActiveTabId(remaining[remaining.length - 1].id);
       }
 
-      lastClosedTabRef.current = { tab: closedTab, index };
-      toast(`Closed "${closedTab.name}"`, {
-        action: { label: "Undo", onClick: () => reopenLastClosedTab() },
+      const toastId = toast(`Closed "${closed.tab.name}"`, {
+        action: { label: "Undo", onClick: () => reopenClosedTab(closed) },
       });
+      undoToastIdsRef.current.push(toastId);
     },
-    [tabs, activeTabId, reopenLastClosedTab],
+    [tabs, activeTabId, workspaceKey, reopenClosedTab],
   );
 
   /**
@@ -456,7 +474,6 @@ export function useTabManager({ activeConnection, metadata, schema, persistWorks
     setEditingTabName,
     addTab,
     closeTab,
-    reopenLastClosedTab,
     updateCurrentTab,
     updateTabById,
     handleTableClick,
