@@ -82,12 +82,32 @@ export const storage = {
     writeJSON("connections", filtered);
     dispatchChange("connections", filtered);
 
+    const favorites = storage.getFavoriteConnectionIds();
+    if (favorites.includes(id)) {
+      const nextFavorites = favorites.filter((favId) => favId !== id);
+      writeJSON("favorite_connections", nextFavorites);
+      dispatchChange("favorite_connections", nextFavorites);
+    }
+
     const order = storage.getConnectionOrder();
     if (order.includes(id)) {
       const nextOrder = order.filter((orderedId) => orderedId !== id);
       writeJSON("connection_order", nextOrder);
       dispatchChange("connection_order", nextOrder);
     }
+  },
+
+  getFavoriteConnectionIds: (): string[] => {
+    return readJSON<string[]>("favorite_connections") ?? [];
+  },
+
+  /** Flips the connection's favorite state and returns the updated id list. */
+  toggleFavoriteConnection: (id: string): string[] => {
+    const current = storage.getFavoriteConnectionIds();
+    const next = current.includes(id) ? current.filter((favId) => favId !== id) : [...current, id];
+    writeJSON("favorite_connections", next);
+    dispatchChange("favorite_connections", next);
+    return next;
   },
 
   getConnectionOrder: (): string[] => {

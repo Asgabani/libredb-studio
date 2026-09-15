@@ -21,6 +21,7 @@ const mockStorage = {
   })),
   getThresholdConfig: mock(() => []),
   getDismissedSeeds: mock(() => ["seed-1"]),
+  getFavoriteConnectionIds: mock(() => ["fav-1"]),
   getConnectionOrder: mock(() => ["c1"]),
 };
 
@@ -35,6 +36,7 @@ const ALL_COLLECTIONS = [
   "masking_config",
   "threshold_config",
   "dismissed_seeds",
+  "favorite_connections",
   "connection_order",
 ];
 
@@ -291,6 +293,7 @@ describe("useStorageSync", () => {
       expect(mockStorage.getMaskingConfig).toHaveBeenCalled();
       expect(mockStorage.getThresholdConfig).toHaveBeenCalled();
       expect(mockStorage.getDismissedSeeds).toHaveBeenCalled();
+      expect(mockStorage.getFavoriteConnectionIds).toHaveBeenCalled();
       expect(mockStorage.getConnectionOrder).toHaveBeenCalled();
     });
   });
@@ -381,6 +384,23 @@ describe("useStorageSync", () => {
       });
 
       expect(localStorage.getItem("libredb_active_connection_id")).toBe("conn-1");
+    });
+
+    test("writes favorite_connections to localStorage on pull", async () => {
+      localStorage.setItem("libredb_server_migrated", "true");
+      setupServerMode({
+        "/api/storage": { ok: true, status: 200, json: { favorite_connections: ["fav-1", "fav-2"] } },
+      });
+
+      const { result } = renderHook(() => useStorageSync());
+
+      await waitFor(() => {
+        expect(result.current.lastSyncedAt).not.toBeNull();
+      });
+
+      const stored = localStorage.getItem("libredb_favorite_connections");
+      expect(stored).not.toBeNull();
+      expect(JSON.parse(stored!)).toEqual(["fav-1", "fav-2"]);
     });
 
     test("writes connection_order to localStorage on pull", async () => {
