@@ -31,6 +31,7 @@ import { ChunkBoundary, ViewLoading } from "@/components/LazyView";
 import { lazyRetry } from "@/lib/lazy";
 import { editorLanguageForTabType } from "@/lib/editor/tab-language";
 import { buildResultExport, type ResultExportFormat } from "@/lib/export/result-export";
+import { writeToClipboard } from "@/components/copy-button";
 import { downloadText } from "@/lib/export/download";
 
 // The ERD is the largest thing this shell can mount (`@xyflow/react` + the elk layout
@@ -235,6 +236,17 @@ export function StudioWorkspace({
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
   // ADDRESSES, not labels, for the reason `src/components/Studio.tsx` gives at the same
   // three lines: a label is not unique within a connection (#789, Task 35).
+  /**
+   * How many catalog-changing statements THIS SHELL has run (#789 Phase 3, discussion #778).
+   *
+   * A counter this shell owns, and it counts exactly one thing: an object apply that this
+   * workspace issued and that came back applied. It is deliberately NOT moved by anything the
+   * host ran through `onQueryExecute`, because nothing reports back what those statements
+   * changed, which is the same absence `refreshToken={0}` used to state by being a constant.
+   *
+   * See the mount below for what a reader is told as a result, and what they are not.
+   */
+  const [objectRefreshToken, setObjectRefreshToken] = useState(0);
   const [profilerPath, setProfilerPath] = useState<readonly string[] | null>(null);
   const [codeGenPath, setCodeGenPath] = useState<readonly string[] | null>(null);
   const [testDataPath, setTestDataPath] = useState<readonly string[] | null>(null);
@@ -265,10 +277,10 @@ export function StudioWorkspace({
   );
 
   // === Export results (shared writers; this shell applies no masking) ===
-  const exportResults = useCallback(
-    (format: ResultExportFormat, _hydrated?: unknown, csvDelimiter?: CsvDelimiter) => {
-      if (!tabMgr.currentTab.result) return;
-      const file = buildResultExport(format, {
+  const buildResultFile = useCallback(
+    (format: ResultExportFormat, csvDelimiter?: CsvDelimiter) => {
+      if (!tabMgr.currentTab.result) return null;
+      return buildResultExport(format, {
         rows: tabMgr.currentTab.result.rows,
         fields: tabMgr.currentTab.result.fields,
         tabName: tabMgr.currentTab.name,
@@ -281,9 +293,46 @@ export function StudioWorkspace({
         columnTypes: tabMgr.currentTab.result.columnTypes,
         csvDelimiter,
       });
-      downloadText(file.content, file.mimeType, `query_result_export.${file.extension}`);
     },
     [tabMgr.currentTab, conn.activeConnection?.type],
+  );
+
+  const exportResults = useCallback(
+    (format: ResultExportFormat, _hydrated?: unknown, csvDelimiter?: CsvDelimiter) => {
+      const file = buildResultFile(format, csvDelimiter);
+      if (file === null) return;
+      downloadText(file.content, file.mimeType, `query_result_export.${file.extension}`);
+    },
+    [buildResultFile],
+  );
+
+  /**
+   * The same rows, in the same format, onto the clipboard (#701).
+   *
+   * Built from the same function as the file above, so the two cannot come to disagree
+   * about what a format means. The byte-order mark is the one thing they do not share:
+   * `downloadText` adds it for a spreadsheet reading bytes off disk, and a paste
+   * carrying it would open with an invisible character wherever it landed.
+   *
+   * The outcome is reported only once the write has one (B43). `writeToClipboard` falls
+   * back to the editing command where there is no secure context, and when both routes
+   * are gone the user is told rather than left to find an empty clipboard mid-paste.
+   */
+  const copyResults = useCallback(
+    (format: ResultExportFormat, _hydrated?: unknown, csvDelimiter?: CsvDelimiter) => {
+      const file = buildResultFile(format, csvDelimiter);
+      if (file === null) return;
+      void writeToClipboard(file.content).then((copied) => {
+        if (copied) toast({ title: `Copied ${file.extension.toUpperCase()} to clipboard` });
+        else
+          toast({
+            title: "Could not copy to clipboard",
+            description: "Select the text and copy it yourself, or export the result as a file.",
+            variant: "destructive",
+          });
+      });
+    },
+    [buildResultFile, toast],
   );
 
   // === Table click handler ===
@@ -366,12 +415,17 @@ export function StudioWorkspace({
    * a host handing a new reader object on a render is not a reason to throw a real definition
    * away; what it must not become is an editor with a Run button, and it does not.
    *
-   * THE ONE PATH THIS DOES NOT COVER, named here because a later change would open it: a tab
-   * holding a document whose state is CLEARED while the host declares no reader would issue the
-   * read. The only control that clears one is the viewer's stale banner, and this shell passes a
-   * hardcoded `refreshToken={0}` below, so nothing here is ever marked stale and the banner is
-   * never drawn. A shell that starts counting DDL has to hand this conjunction a reader that
-   * refuses, or the read goes to a route this package does not ship.
+   * THE PATH THIS COVERS THAT NOTHING USED TO REACH, and it is now the second load-bearing
+   * reason for the conjunction rather than a note about a later change: a tab holding a document
+   * whose state is CLEARED while the host declares no reader would send the viewer's default
+   * `httpSourceReader` at `/api/db/objects/source`, which this package does not ship. The only
+   * control that clears one is the viewer's stale banner, and until this phase this shell passed
+   * a hardcoded `refreshToken={0}`, so nothing was ever marked stale and the banner was never
+   * drawn. It counts its OWN applies now, so the banner is reachable and so is its control. What
+   * makes the clear safe is that this failure is non-undefined in the SAME render: `needsRead` in
+   * `ObjectSourceView` is `document === undefined && failure === undefined`, so no read is issued
+   * at all and the pane refuses instead. `tests/components/studio/embedded-source.test.tsx`
+   * drives clear-then-withdraw and asserts that not one request left this shell.
    */
   const sourceFailure =
     sourceTab?.failure ??
@@ -427,6 +481,54 @@ export function StudioWorkspace({
     },
     [setTabs, activeTabId],
   );
+
+  /**
+   * What this shell does after an apply that CHANGED the addressed object (#789 Phase 3).
+   *
+   * IT MOVES ITS OWN COUNTER AND CLEARS THE TAB, in one handler, which is what
+   * `src/components/Studio.tsx` does for the same gesture. React commits both writes together, so
+   * the pane re-renders once with `refreshToken = n+1` AND `document === undefined`, its read
+   * effect issues a fresh read recording `tokenAtRead = n+1`, and the landed read writes
+   * `readAtToken = n+1`. The tab that applied is therefore NOT marked stale, while every other open
+   * Source tab is: the tab that applied knows what happened, the others know only that something
+   * did.
+   *
+   * THIS OVERTURNS THE FIRST ANSWER, WHICH CLEARED NOTHING, and the reason it gave is written out
+   * here because the reason is what was wrong rather than the taste. It said an automatic clear
+   * "would leave a tab with no document, no failure and no reader, which is the one state that
+   * would send the viewer's default reader at a route this package does not ship", and then said
+   * `sourceFailure` above closes that door in the same render. It does, and a reason discharged
+   * three lines below itself decides nothing. What the old behaviour actually produced is what
+   * decided it: the reader was left looking at the definition the object NO LONGER HOLDS, under an
+   * invitation to press "Read again", because a moved counter re-reads nothing on its own.
+   * `needsRead` in `ObjectSourceView` is `document === undefined && failure === undefined`, so the
+   * counter alone only makes `stale` true and draws the banner over stale bytes.
+   *
+   * THE WITHDRAWAL PATH IS DRIVEN AND NOT ARGUED. `tests/components/studio/embedded-source.test.tsx`
+   * applies successfully and has the host withdraw `readObjectSource` in the same act the answer
+   * lands: `sourceFailure` answers its sentence, `needsRead` is false, the pane refuses in the
+   * viewer's own grammar, and not one request leaves this shell. That is the hazard the old reason
+   * named, measured rather than reasoned about.
+   *
+   * NO TOAST, which is the one place the two shells still differ, and it is a measurement rather
+   * than an omission. `src/components/Studio.tsx` announces the re-read with
+   * `toast({ title: "Applied. Reading the definition again." })`, and `useToast` is a wrapper over
+   * `sonner`, whose toasts render only into a mounted `<Toaster />`. That component is mounted in
+   * `src/app/layout.tsx`, which belongs to the standalone application; `src/exports/` re-exports no
+   * Toaster and this shell mounts none, so the same call in this file is a line no adopter can see
+   * and no test can assert. MEASURED: added here, it killed zero tests in
+   * `tests/components/studio/embedded-source.test.tsx` while deleting the clear killed three and
+   * deleting the counter killed one. What announces the re-read here is the pane's own
+   * `object-source-loading` region, which is an `output` element carrying an implicit
+   * `role="status"`, so a screen reader is told the same thing by the surface that knows it.
+   *
+   * The DRAFT is not dropped here either. The pane drops it itself, keyed on the part its plan
+   * was built for, which is a key this shell does not hold and must not guess.
+   */
+  const handleApplied = useCallback(() => {
+    setObjectRefreshToken((previous) => previous + 1);
+    onSourceChange({ document: undefined, failure: undefined, readAtToken: undefined });
+  }, [onSourceChange]);
 
   /**
    * The row menu's actions in THIS shell, which is four of the six (U22, #789).
@@ -612,6 +714,7 @@ export function StudioWorkspace({
                               <QueryEditor
                                 ref={queryEditorRef}
                                 value={tabMgr.currentTab.query}
+                                documentId={tabMgr.currentTab.id}
                                 onContentChange={(val) => tabMgr.updateTabById(tabMgr.currentTab.id, { query: val })}
                                 language={editorLanguageForTabType(tabMgr.currentTab.type)}
                                 databaseType={conn.activeConnection?.type}
@@ -644,18 +747,44 @@ export function StudioWorkspace({
                               failure={sourceFailure}
                               activePartId={sourceTab.activePartId}
                               /*
-                                A DECISION and not a stub. The standalone shell passes a
-                                catalog-change counter it increments whenever something it ran
-                                changed the catalog; this shell counts no DDL, because every
-                                statement goes out through the host's `onQueryExecute` and nothing
-                                reports back what it changed. Zero is a real token rather than a
-                                missing one: the viewer marks a tab stale when the token has MOVED
-                                since the read, so a constant says "this shell has no such fact"
-                                and a Source tab here is never marked stale.
+                                A COUNTER THIS SHELL OWNS, and it counts exactly one thing: an
+                                object apply this workspace issued that came back applied (#789
+                                Phase 3). It was the constant zero until this phase, and that was
+                                a DECISION and not a stub: the standalone shell increments a
+                                catalog-change counter for everything it runs, and this shell runs
+                                nothing, because every statement goes out through the host's
+                                `onQueryExecute` and nothing reports back what it changed.
+
+                                An apply breaks that premise and only that premise, because an
+                                apply THIS shell issues IS a DDL this shell knows about. So the
+                                original sentence still holds for everything else and is kept
+                                rather than replaced: this counter STILL cannot see a DDL the host
+                                ran through `onQueryExecute`. A stale banner here therefore means
+                                "this workspace changed something" and its absence NEVER means
+                                "nothing changed".
                               */
-                              refreshToken={0}
+                              refreshToken={objectRefreshToken}
                               readAtToken={sourceTab.readAtToken}
                               reader={conn.sourceReader}
+                              editingPartId={sourceTab.editingPartId}
+                              dirty={sourceTab.dirty}
+                              /*
+                                WHO performs the apply, and `undefined` for a host that declared
+                                no `objectEditor` (#789 Phase 3, discussion #778). Withholding it
+                                is what keeps an existing adopter unchanged: with no `onApply` the
+                                pane is exactly Phase 2, no bar and no sentence.
+
+                                NOTHING HERE CONSULTS `conn.metadata.capabilities` for the edit
+                                gate, and on this shell that matters more than on the standalone
+                                one: this shell's declaration is the HOST's own, per connection,
+                                and nothing type-checks a host. MEASURED with a stub host during
+                                this phase's browser probe: the host declared `package`, the shell
+                                drew a `Packages 1` folder for it, and the connected MariaDB had
+                                no such thing. The affordance travels with the READ instead, on
+                                the part, from whoever answered it.
+                              */
+                              onApply={conn.sourceApplier}
+                              onApplied={handleApplied}
                               onChange={onSourceChange}
                             />
                           </div>
@@ -692,6 +821,7 @@ export function StudioWorkspace({
                         }
                         isLoadingMore={tabMgr.currentTab.isLoadingMore}
                         onExportResults={exportResults}
+                        onCopyResults={copyResults}
                       />
                     </ResizablePanel>
                   </ResizablePanelGroup>

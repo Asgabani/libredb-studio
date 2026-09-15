@@ -489,6 +489,27 @@ columnTypes? }`.
   `Count` column is not surfaced (§3.4).
 - **Cancellation** calls `interrupt()` on the connection (§3.9).
 
+### A transaction a statement left open
+
+A `BEGIN` sent through `query()` opens a transaction on the ONE connection this provider holds
+(§3.8), and the provider is cached per `connection.id` for the whole process, so nothing in the
+request cycle closed it and it belonged to whoever borrowed the handle next.
+Measured 2026-09-13 through `POST /api/db/multi-query` on v1.5.5, the loss was silent: after
+`BEGIN; INSERT INTO t VALUES (1); SELECT * FROM <missing>`, the next user's `INSERT` answered
+HTTP 200 and read its own row back, and a later `ROLLBACK` through the app discarded it with no
+error at any point.
+
+`endOpenQueryTransaction()` ends it and reports `"none"` or `"rolled-back"`.
+
+**The ask and the act are one call, because on this engine they cannot be separated.** DuckDB v1.5.5
+publishes no transaction-state reading: `current_transaction_id()` answers in both states (a fresh id
+per implicit transaction outside one, the transaction's own id inside), `transaction_timestamp()` is
+an alias of `get_current_timestamp()`, and the client context object carries only a connection id.
+`duckdb_functions()` lists no other candidate. So the engine's own refusal of a `ROLLBACK` —
+"TransactionContext Error: cannot rollback - no transaction is active" — is the answer, and it costs
+the session nothing: measured, the very next statement runs normally. Any OTHER rollback failure is
+raised rather than read as an answer.
+
 ### EXPLAIN
 
 `explainFormat` is `duckdb-json`. The provider sends `EXPLAIN (FORMAT JSON) <query>`, reads
@@ -894,6 +915,15 @@ schema and the last path segment is the whole identity. This is unlike PostgreSQ
 segment carries an argument type list.
 
 ---
+
+### Object edit (#789)
+
+No kind here is editable on day one, and the four kinds get there two ways: `view` is DEFERRED, and the other three are REFUSED for two different reasons.
+`view` is the one DEFERRED case and is the cheapest second producer for the collateral machinery: a single `CREATE OR REPLACE` is atomic on failure, and the price is that a byte-identical replace DISCARDS the view's COMMENT.
+`macro` is refused while a Phase 2 defect stands: `CREATE OR REPLACE MACRO` replaces the NAME and deletes every other overload, and the macro read in [`index.ts`](../../src/lib/db/providers/sql/duckdb/index.ts) takes `rows[0]`, so the pane shows one overload and calls it the definition.
+`table` and `sequence` are refused because a SUCCESS would destroy what the user was never shown: `CREATE OR REPLACE TABLE` with the table's own published DDL deletes every row, and a sequence's published `START` is the reached value plus one, so the pane shows a clause the author never typed and which moves on every use.
+Shipping even the `view` case would make this provider the first producer of `revision.scope: "connection"`, which needs an identity for the PROVIDER INSTANCE that `getOrCreateProvider()` does not mint.
+No kind here declares `acceptsSourceEdits`, and `tests/isolated/object-edit-declarations.test.ts` is what holds that absence and this section together.
 
 ## 7. Monitoring & health
 

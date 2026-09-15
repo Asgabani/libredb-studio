@@ -32,7 +32,7 @@ import { AgentRail } from "@/components/agent/AgentRail";
 import { DatabaseConnection, SavedQuery } from "@/lib/types";
 import type { DatabaseObject } from "@/lib/db/types";
 import { findKind, kindHasSource, relationKindIds } from "@/lib/db/object-kinds";
-import { ObjectSourceView, type ObjectSourcePatch } from "@/components/object-source";
+import { httpSourceApplier, ObjectSourceView, type ObjectSourcePatch } from "@/components/object-source";
 import { ChunkBoundary, ViewLoading } from "@/components/LazyView";
 import { lazyRetry } from "@/lib/lazy";
 import { editorLanguageForTabType, resolveTabType } from "@/lib/editor/tab-language";
@@ -43,6 +43,7 @@ import {
   type ResultExportFormat,
 } from "@/lib/export/result-export";
 import { downloadText } from "@/lib/export/download";
+import { writeToClipboard } from "@/components/copy-button";
 import { newLocalId } from "@/lib/ids";
 import { resolveAgentRunConnectionId } from "@/hooks/use-connection-payload";
 import { isMobileViewport, useIsMobile } from "@/hooks/use-mobile";
@@ -224,6 +225,55 @@ export default function Studio() {
     },
     [setTabs, activeTabId],
   );
+
+  /**
+   * What this shell does after an apply that CHANGED the addressed object (#789 Phase 3).
+   *
+   * MEASURED, and it is the reason this handler exists at all: the Source pane NEVER re-reads
+   * after a change made elsewhere in the same app. A new body was applied to
+   * `p3probe.order_total` through `POST /api/db/query` while its Source tab was open, and the tab
+   * kept showing the pre-apply text with no stale banner. `objectRefreshToken` above is a counter
+   * this shell increments for what IT ran, and a raw query is not one of them, so an apply that
+   * did not move it would leave the reader looking at the definition they just replaced.
+   *
+   * TWO WRITES IN ONE HANDLER, and the batching is the point rather than an optimisation. React
+   * commits both together, so the pane re-renders exactly once, with `refreshToken = n+1` AND
+   * `document === undefined`. Its read effect then issues a fresh read recording `tokenAtRead =
+   * n+1`, and the landed read writes `readAtToken = n+1`, which EQUALS the counter. So the tab
+   * that applied is NOT marked stale, while every other open Source tab is: the tab that applied
+   * knows exactly what happened, and the others know only that something did. Split into two
+   * commits, with the clear first, the read goes out at token n and comes back stale on the one
+   * tab whose reader is certain about what changed.
+   *
+   * The CLEAR is `onSourceChange`'s explicit-undefined form, which is a clear and not a no-op,
+   * and it addresses the ACTIVE tab. It reaches the right tab, and the reason written here first
+   * was NOT the reason, which is worth the space because the wrong reason survives a refactor the
+   * right one would not.
+   *
+   * The wrong reason: "the pane that performed the apply is mounted in the active tab, because it
+   * is the only Source pane this shell renders". MEASURED FALSE at the moment that matters. With
+   * the apply in flight and a direct DOM click moving the strip to another tab, the apply landed,
+   * the toast fired, and the tab that was active THEN was not cleared.
+   *
+   * The real reason is a STALE CLOSURE, and it is load-bearing rather than incidental:
+   * `onSourceChange` here is bound to the `activeTabId` of the render at CONFIRM time, and the
+   * pane captures it through `onApplied`, so the clear addresses the tab that was active when the
+   * reader pressed Confirm. That is the tab that applied, which is what this is for.
+   *
+   * Reachability of the disagreement, also measured: the strip cannot be moved while the dialog is
+   * open, because Radix's modal aria-hides it, and `setActiveTabId` has no caller outside the strip
+   * and the sidebar tree, both of which the modal covers. So the two readings agree on every path
+   * that exists today, and this comment is here so that a change which decouples them is read as
+   * the change it is.
+   *
+   * The DRAFT is not dropped here. The pane drops it itself, keyed on the part its PLAN was built
+   * for, which is a key this shell does not hold and must not guess.
+   */
+  const handleApplied = useCallback(() => {
+    objectsChanged();
+    onSourceChange({ document: undefined, failure: undefined, readAtToken: undefined });
+    toast({ title: "Applied. Reading the definition again." });
+  }, [objectsChanged, onSourceChange, toast]);
 
   // 5. Query Execution
   const queryExec = useQueryExecution({
@@ -502,13 +552,13 @@ export default function Studio() {
    * `currentTab.result` wrote rows nobody was looking at. That is why the menu used to
    * be hidden over a hydrated view instead of retargeted.
    */
-  const exportResults = (
+  const buildResultFile = (
     format: ResultExportFormat,
-    hydrated: AgentArtifactHydration | null = null,
+    hydrated: AgentArtifactHydration | null,
     csvDelimiter?: CsvDelimiter,
   ) => {
     const source = hydrated?.result ?? tabMgr.currentTab.result;
-    if (!source) return;
+    if (!source) return null;
     // The columns the engine declared for THIS result. The writers read every row by
     // these names rather than by whatever keys row 0 happens to carry, so a row with
     // a different key order — or a document store's row missing a field entirely —
@@ -517,7 +567,7 @@ export default function Studio() {
     const sensitiveColumns = detectSensitiveColumnsFromConfig(fields, maskingConfig);
     const rows = effectiveMasking ? applyMaskingToRows(source.rows, fields, sensitiveColumns) : source.rows;
 
-    const file = buildResultExport(format, {
+    return buildResultExport(format, {
       rows,
       fields,
       // A run's rows did not come from this tab, so the SQL forms take the neutral
@@ -530,7 +580,51 @@ export default function Studio() {
       columnTypes: source.columnTypes,
       csvDelimiter,
     });
+  };
+
+  const exportResults = (
+    format: ResultExportFormat,
+    hydrated: AgentArtifactHydration | null = null,
+    csvDelimiter?: CsvDelimiter,
+  ) => {
+    const file = buildResultFile(format, hydrated, csvDelimiter);
+    if (file === null) return;
     downloadText(file.content, file.mimeType, resultExportFileName(file.extension, hydrated?.runId));
+  };
+
+  /**
+   * The same rows, in the same format, onto the clipboard (#701).
+   *
+   * Two things this shares with the export above, and both are the reason it is built
+   * from the same function rather than beside it: the masking, so the clipboard is not
+   * a way around a masked column, and the rows, so a hydrated run's result is copied
+   * as what is on screen rather than as the tab's own.
+   *
+   * What it does NOT share is the byte-order mark. That is added by `downloadText` for
+   * a spreadsheet reading bytes off disk; a paste carrying it would open with an
+   * invisible character wherever it landed.
+   *
+   * The outcome is reported only once the write has one (B43). `writeToClipboard`
+   * falls back to the editing command where there is no secure context — several
+   * distribution channels serve plain HTTP — and when both routes are gone the user is
+   * told, because the alternative is discovering an empty clipboard mid-paste.
+   */
+  const copyResults = (
+    format: ResultExportFormat,
+    hydrated: AgentArtifactHydration | null = null,
+    csvDelimiter?: CsvDelimiter,
+  ) => {
+    const file = buildResultFile(format, hydrated, csvDelimiter);
+    if (file === null) return;
+    void writeToClipboard(file.content).then((copied) => {
+      if (copied) toast({ title: `Copied ${file.extension.toUpperCase()} to clipboard` });
+      else
+        toast({
+          title: "Could not copy to clipboard",
+          description: "Select the text and copy it yourself, or export the result as a file.",
+          variant: "destructive",
+        });
+    });
   };
 
   /** Open and run the statement for one object, addressed by its PATH (#789). */
@@ -905,6 +999,7 @@ export default function Studio() {
                               <QueryEditor
                                 ref={queryEditorRef}
                                 value={tabMgr.currentTab.query}
+                                documentId={tabMgr.currentTab.id}
                                 onContentChange={(val) => tabMgr.updateTabById(tabMgr.currentTab.id, { query: val })}
                                 onExplain={
                                   metadata?.capabilities.supportsExplain
@@ -951,6 +1046,27 @@ export default function Studio() {
                               activePartId={sourceTab.activePartId}
                               refreshToken={objectRefreshToken}
                               readAtToken={sourceTab.readAtToken}
+                              editingPartId={sourceTab.editingPartId}
+                              dirty={sourceTab.dirty}
+                              /*
+                                WHO performs the apply, passed EXPLICITLY rather than defaulted
+                                inside the pane (#789 Phase 3). That is the difference that lets
+                                the embedded shell withhold it, and withholding it is what keeps
+                                an existing adopter unchanged: with no `onApply` the pane is
+                                exactly Phase 2, no bar and no sentence.
+
+                                NOTHING HERE CONSULTS `metadata.capabilities` for the edit gate,
+                                and that is D57 closed by construction. The kind lookup above
+                                resolves a LABEL and nothing else. MEASURED end to end on a live
+                                MariaDB 12.3.2: `provider-meta` answered the MySQL six for a
+                                server whose connected provider serves `package` in full, so this
+                                shell's copy of a declaration is a statement about some server
+                                and not necessarily the connected one. The affordance travels
+                                with the read instead, on the part, from the provider that
+                                answered it.
+                              */
+                              onApply={httpSourceApplier}
+                              onApplied={handleApplied}
                               onChange={onSourceChange}
                             />
                           </div>
@@ -997,6 +1113,7 @@ export default function Studio() {
                         }
                         isLoadingMore={tabMgr.currentTab.isLoadingMore}
                         onExportResults={exportResults}
+                        onCopyResults={copyResults}
                         agentArtifact={agentArtifact.artifact}
                         onDismissAgentArtifact={agentArtifact.dismiss}
                       />
