@@ -5,6 +5,7 @@ import "../helpers/mock-navigation";
 import React from "react";
 import { describe, test, expect, afterEach } from "bun:test";
 import { render, cleanup, fireEvent, act } from "@testing-library/react";
+import ReactDOMServer from "react-dom/server";
 
 import { ShortcutsDialog, type ShortcutsDialogRef } from "@/components/ShortcutsDialog";
 import { SHORTCUT_GROUPS } from "@/lib/shortcuts";
@@ -14,6 +15,14 @@ afterEach(() => {
 });
 
 describe("ShortcutsDialog", () => {
+  test("renders nothing during server rendering", () => {
+    // Both useSyncExternalStore calls take their SERVER snapshot during SSR (React never
+    // runs the effects that would let either one see real module state), so this renders
+    // null regardless of what any client-side instance has done to `sharedOpen` elsewhere -
+    // there is no "started open" case to prove wrong here, only that this doesn't throw.
+    expect(ReactDOMServer.renderToString(React.createElement(ShortcutsDialog))).toBe("");
+  });
+
   test("is closed on mount", () => {
     const { queryByText } = render(<ShortcutsDialog />);
     expect(queryByText("Keyboard Shortcuts")).toBeNull();
@@ -69,6 +78,25 @@ describe("ShortcutsDialog", () => {
     expect(queryByText("Keyboard Shortcuts")).toBeNull();
   });
 
+  test("pressing ? inside Monaco's edit-context element does not open the dialog", () => {
+    // Monaco 0.56 focuses a div.native-edit-context inside .monaco-editor — neither an
+    // <input>/<textarea> nor contentEditable, which is exactly why this needs its own check
+    // rather than being caught by the three above.
+    const { queryByText, container } = render(
+      <>
+        <div className="monaco-editor">
+          <div className="native-edit-context" aria-label="sql-input" />
+        </div>
+        <ShortcutsDialog />
+      </>,
+    );
+
+    const editContext = container.querySelector('[aria-label="sql-input"]')!;
+    fireEvent.keyDown(editContext, { key: "?" });
+
+    expect(queryByText("Keyboard Shortcuts")).toBeNull();
+  });
+
   test("a keydown that is not ? is ignored", () => {
     const { queryByText } = render(<ShortcutsDialog />);
 
@@ -111,5 +139,76 @@ describe("ShortcutsDialog", () => {
 
     expect(removed).toBe(true);
     document.removeEventListener = originalRemove;
+  });
+
+  describe("multiple mounted instances (#746 review)", () => {
+    // Reproduces Studio.tsx (mounted unconditionally) plus DataProfiler.tsx (mounted only
+    // while the profiler is open) both being in the tree at once in the standalone shell.
+
+    test("only the first-mounted instance renders the dialog content", () => {
+      const { queryAllByText } = render(
+        <>
+          <ShortcutsDialog />
+          <ShortcutsDialog />
+        </>,
+      );
+
+      fireEvent.keyDown(document, { key: "?" });
+
+      // Two instances, one Dialog: a second copy of the content would fail this.
+      expect(queryAllByText("Keyboard Shortcuts")).toHaveLength(1);
+    });
+
+    test("? from either instance's listener opens the one shared dialog", () => {
+      let second!: HTMLDivElement;
+      const { queryAllByText } = render(
+        <>
+          <ShortcutsDialog />
+          <div
+            ref={(el) => {
+              second = el as HTMLDivElement;
+            }}
+          >
+            <ShortcutsDialog />
+          </div>
+        </>,
+      );
+
+      // Fired on the second instance's own subtree - still document-level, but proves
+      // it isn't the first instance's DOM position that matters, its own listener is live.
+      fireEvent.keyDown(second, { key: "?" });
+
+      expect(queryAllByText("Keyboard Shortcuts")).toHaveLength(1);
+    });
+
+    test("unmounting the non-rendering instance leaves the dialog open", () => {
+      function Harness({ mountSecond }: { mountSecond: boolean }): React.JSX.Element {
+        return (
+          <>
+            <ShortcutsDialog />
+            {mountSecond && <ShortcutsDialog />}
+          </>
+        );
+      }
+
+      const { getByText, queryByText, rerender } = render(<Harness mountSecond />);
+      fireEvent.keyDown(document, { key: "?" });
+      expect(getByText("Keyboard Shortcuts")).not.toBeNull();
+
+      rerender(<Harness mountSecond={false} />);
+
+      expect(queryByText("Keyboard Shortcuts")).not.toBeNull();
+    });
+
+    test("unmounting the last instance closes the dialog for the next mount", () => {
+      const first = render(<ShortcutsDialog />);
+      fireEvent.keyDown(document, { key: "?" });
+      expect(first.getByText("Keyboard Shortcuts")).not.toBeNull();
+
+      first.unmount();
+
+      const second = render(<ShortcutsDialog />);
+      expect(second.queryByText("Keyboard Shortcuts")).toBeNull();
+    });
   });
 });
