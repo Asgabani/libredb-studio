@@ -31,6 +31,11 @@ function SectionHeader({ label }: { label: string }) {
   );
 }
 
+/** Whether two connections render in the same section: both favorited, or neither. */
+function inSameSection(favoriteConnectionIds: Set<string> | undefined, a: string, b: string): boolean {
+  return (favoriteConnectionIds?.has(a) ?? false) === (favoriteConnectionIds?.has(b) ?? false);
+}
+
 export function ConnectionsList({
   connections,
   activeConnection,
@@ -62,25 +67,25 @@ export function ConnectionsList({
     setDragOverId(null);
   }, []);
 
-  const handleDrop = useCallback(
-    (targetId: string) => {
-      if (draggedId !== null && draggedId !== targetId) {
-        const ids = ordered.map((c) => c.id);
-        const fromIndex = ids.indexOf(draggedId);
-        const toIndex = ids.indexOf(targetId);
-        if (fromIndex !== -1 && toIndex !== -1) {
-          const reordered = [...ids];
-          const [moved] = reordered.splice(fromIndex, 1);
-          reordered.splice(toIndex, 0, moved);
-          onReorderConnections?.(reordered);
-        }
+  const handleDrop = (targetId: string) => {
+    // A drop across the Favorites/Connections boundary is ignored. The dragged row stays in
+    // its own section either way, so accepting it would only change the saved order in a way
+    // nothing on screen shows.
+    if (draggedId !== null && draggedId !== targetId && inSameSection(favoriteConnectionIds, draggedId, targetId)) {
+      const ids = ordered.map((c) => c.id);
+      const fromIndex = ids.indexOf(draggedId);
+      const toIndex = ids.indexOf(targetId);
+      if (fromIndex !== -1 && toIndex !== -1) {
+        const reordered = [...ids];
+        const [moved] = reordered.splice(fromIndex, 1);
+        reordered.splice(toIndex, 0, moved);
+        onReorderConnections?.(reordered);
       }
-      clearDragState();
-    },
-    [draggedId, ordered, onReorderConnections, clearDragState],
-  );
+    }
+    clearDragState();
+  };
 
-  const renderItem = (conn: DatabaseConnection) => (
+  const renderItem = (conn: DatabaseConnection, section: DatabaseConnection[]) => (
     <ConnectionItem
       key={conn.id}
       connection={conn}
@@ -91,9 +96,14 @@ export function ConnectionsList({
       onDuplicate={onDuplicateConnection}
       isFavorite={favoriteConnectionIds?.has(conn.id) ?? false}
       onToggleFavorite={onToggleFavoriteConnection}
-      draggable={reorderable && ordered.length > 1}
+      draggable={reorderable && section.length > 1}
       isDragging={draggedId === conn.id}
-      isDragOver={dragOverId === conn.id && draggedId !== conn.id}
+      isDragOver={
+        dragOverId === conn.id &&
+        draggedId !== null &&
+        draggedId !== conn.id &&
+        inSameSection(favoriteConnectionIds, draggedId, conn.id)
+      }
       onDragStart={() => setDraggedId(conn.id)}
       onDragEnter={() => setDragOverId(conn.id)}
       onDragEnd={clearDragState}
@@ -106,7 +116,7 @@ export function ConnectionsList({
       {favorites.length > 0 && (
         <section className="mb-4">
           <SectionHeader label="Favorites" />
-          <div className="space-y-0.5">{favorites.map(renderItem)}</div>
+          <div className="space-y-0.5">{favorites.map((conn) => renderItem(conn, favorites))}</div>
         </section>
       )}
 
@@ -125,7 +135,7 @@ export function ConnectionsList({
                 </Button>
               </div>
             ) : (
-              rest.map(renderItem)
+              rest.map((conn) => renderItem(conn, rest))
             )}
           </div>
         </section>
