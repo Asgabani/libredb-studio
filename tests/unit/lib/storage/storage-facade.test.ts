@@ -223,4 +223,37 @@ describe("storage facade: connection order", () => {
     expect((captured as unknown as CustomEvent).detail.collection).toBe("connection_order");
     expect((captured as unknown as CustomEvent).detail.data).toEqual(["conn-1"]);
   });
+
+  test("deleteConnection prunes the deleted id out of connection_order", () => {
+    storage.saveConnection(makeConnection({ id: "conn-1" }));
+    storage.setConnectionOrder(["conn-2", "conn-1"]);
+
+    storage.deleteConnection("conn-1");
+
+    expect(storage.getConnectionOrder()).toEqual(["conn-2"]);
+  });
+
+  test("deleteConnection does not touch connection_order when the deleted id wasn't in it", () => {
+    storage.saveConnection(makeConnection({ id: "conn-1" }));
+    storage.setConnectionOrder(["conn-2"]);
+
+    storage.deleteConnection("conn-1");
+
+    expect(storage.getConnectionOrder()).toEqual(["conn-2"]);
+  });
+
+  test("deleteConnection dispatches a connection_order change only when the deleted id was ordered", () => {
+    storage.saveConnection(makeConnection({ id: "conn-1" }));
+    storage.setConnectionOrder(["conn-1"]);
+    const collections: string[] = [];
+    const handler = (e: Event) => {
+      collections.push((e as CustomEvent).detail.collection);
+    };
+    window.addEventListener("libredb-storage-change", handler);
+
+    storage.deleteConnection("conn-1");
+
+    expect(collections).toContain("connection_order");
+    window.removeEventListener("libredb-storage-change", handler);
+  });
 });

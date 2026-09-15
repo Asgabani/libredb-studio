@@ -81,6 +81,13 @@ export const storage = {
     const filtered = connections.filter((c) => c.id !== id);
     writeJSON("connections", filtered);
     dispatchChange("connections", filtered);
+
+    const order = storage.getConnectionOrder();
+    if (order.includes(id)) {
+      const nextOrder = order.filter((orderedId) => orderedId !== id);
+      writeJSON("connection_order", nextOrder);
+      dispatchChange("connection_order", nextOrder);
+    }
   },
 
   getConnectionOrder: (): string[] => {
